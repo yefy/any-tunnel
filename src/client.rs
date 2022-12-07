@@ -1,6 +1,8 @@
 use super::peer_client::PeerClient;
 use super::peer_stream_connect::PeerStreamConnect;
 use super::stream::Stream;
+use anyhow::anyhow;
+use anyhow::Result;
 use chrono::prelude::*;
 use lazy_static::lazy_static;
 use std::net::SocketAddr;
@@ -27,9 +29,15 @@ impl Client {
     pub async fn connect(
         &self,
         peer_stream_connect: Arc<Box<dyn PeerStreamConnect>>,
-    ) -> anyhow::Result<(Stream, SocketAddr, SocketAddr)> {
-        let connect_addr = peer_stream_connect.connect_addr().await?;
-        let (stream, local_addr, remote_addr) = peer_stream_connect.connect(&connect_addr).await?;
+    ) -> Result<(Stream, SocketAddr, SocketAddr)> {
+        let connect_addr = peer_stream_connect
+            .connect_addr()
+            .await
+            .map_err(|e| anyhow!("err:connect_addr => e:{}", e))?;
+        let (stream, local_addr, remote_addr) = peer_stream_connect
+            .connect(&connect_addr)
+            .await
+            .map_err(|e| anyhow!("err:connect => e:{}", e))?;
         let session_id = {
             let client_id = CLIENT_ID.fetch_add(1, Ordering::Relaxed);
             format!(
@@ -51,9 +59,10 @@ impl Client {
         let peer_client = PeerClient::new(stream_to_peer_stream_rx, peer_stream_to_peer_client_tx);
         peer_client
             .create_peer_stream(true, session_id.clone(), stream)
-            .await?;
+            .await
+            .map_err(|e| anyhow!("err:create_peer_stream => e:{}", e))?;
         tokio::spawn(async move {
-            let ret: anyhow::Result<()> = async {
+            let ret: Result<()> = async {
                 peer_client
                     .start(
                         peer_client_to_stream_tx,
@@ -61,7 +70,8 @@ impl Client {
                         session_id,
                         Some((peer_stream_connect, connect_addr)),
                     )
-                    .await?;
+                    .await
+                    .map_err(|e| anyhow!("err:peer_client.start => e:{}", e))?;
                 Ok(())
             }
             .await;

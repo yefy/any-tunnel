@@ -3,6 +3,8 @@ use super::protopack;
 use super::stream::Stream;
 use super::stream_flow::AsyncReadAsyncWrite;
 use super::stream_flow::StreamFlow;
+use anyhow::anyhow;
+use anyhow::Result;
 use hashbrown::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -21,8 +23,12 @@ impl Listener {
         Listener { accept_rx }
     }
 
-    pub async fn accept(&mut self) -> anyhow::Result<(Stream, SocketAddr, SocketAddr)> {
-        let accept = self.accept_rx.recv().await?;
+    pub async fn accept(&mut self) -> Result<(Stream, SocketAddr, SocketAddr)> {
+        let accept = self
+            .accept_rx
+            .recv()
+            .await
+            .map_err(|e| anyhow!("err:self.accept_rx.recv => e:{}", e))?;
         log::debug!("accept_rx recv");
         Ok(accept)
     }
@@ -44,7 +50,7 @@ impl Publish {
         stream: RW,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         self.server
             .create_connect(
                 StreamFlow::new(Box::new(stream)),
@@ -80,11 +86,11 @@ impl Server {
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         accept_tx: AcceptSenderType,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         let (mut r, _) = tokio::io::split(&mut stream);
         let tunnel_hello = protopack::read_tunnel_hello(&mut r).await?;
         if tunnel_hello.is_none() {
-            return Err(anyhow::anyhow!("err:read_tunnel_hello"))?;
+            return Err(anyhow!("err:read_tunnel_hello"))?;
         }
         let tunnel_hello = tunnel_hello.unwrap();
         log::debug!("server tunnel_hello:{:?}", tunnel_hello);
@@ -103,7 +109,10 @@ impl Server {
             let peer_client = peer_client.unwrap();
             if peer_client.is_some() {
                 let peer_client = peer_client.unwrap();
-                peer_client.create_server_peer_stream(false, stream).await?;
+                peer_client
+                    .create_server_peer_stream(false, stream)
+                    .await
+                    .map_err(|e| anyhow!("err:create_server_peer_stream => e:{}", e))?;
                 return Ok(());
             } else {
                 log::info!("session_id closed:{}", session_id);
@@ -127,7 +136,7 @@ impl Server {
         let peer_client2 = peer_client.clone();
         let context = self.context.clone();
         tokio::spawn(async move {
-            let ret: anyhow::Result<()> = async {
+            let ret: Result<()> = async {
                 peer_client
                     .start(
                         peer_client_to_stream_tx,
@@ -135,7 +144,8 @@ impl Server {
                         session_id.clone(),
                         None,
                     )
-                    .await?;
+                    .await
+                    .map_err(|e| anyhow!("err:peer_client.start => e:{}", e))?;
                 Ok(())
             }
             .await;
@@ -157,11 +167,12 @@ impl Server {
                 remote_addr,
             ))
             .await
-            .map_err(|_| anyhow::anyhow!("err:accept_tx"))?;
+            .map_err(|_| anyhow!("err:accept_tx"))?;
 
         peer_client2
             .create_server_peer_stream(false, stream)
-            .await?;
+            .await
+            .map_err(|e| anyhow!("err:create_server_peer_stream => e:{}", e))?;
         Ok(())
     }
 

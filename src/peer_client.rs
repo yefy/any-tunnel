@@ -5,6 +5,8 @@ use super::protopack::TunnelData;
 use super::protopack::TunnelHello;
 use super::protopack::TUNNEL_VERSION;
 use super::stream_flow::StreamFlow;
+use anyhow::anyhow;
+use anyhow::Result;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -32,19 +34,19 @@ impl PeerClient {
         peer_stream_to_peer_client_rx: async_channel::Receiver<TunnelData>,
         session_id: String,
         peer_stream_connect: Option<(Arc<Box<dyn PeerStreamConnect>>, SocketAddr)>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         tokio::select! {
             biased;
             ret = self.peer_client_to_stream(peer_client_to_stream_tx, peer_stream_to_peer_client_rx) => {
-                ret.map_err(|e| anyhow::anyhow!("err:peer_client_to_stream => e:{}", e))?;
+                ret.map_err(|e| anyhow!("err:peer_client_to_stream => e:{}", e))?;
                 Ok(())
             }
             ret = self.create_connect(session_id,peer_stream_connect) => {
-                ret.map_err(|e| anyhow::anyhow!("err:create_connect => e:{}", e))?;
+                ret.map_err(|e| anyhow!("err:create_connect => e:{}", e))?;
                 Ok(())
             }
             else => {
-                return Err(anyhow::anyhow!("err:select"));
+                return Err(anyhow!("err:select"));
             }
         }
     }
@@ -53,7 +55,7 @@ impl PeerClient {
         &self,
         peer_client_to_stream_tx: mpsc::Sender<TunnelData>,
         peer_stream_to_peer_client_rx: async_channel::Receiver<TunnelData>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         let mut pack_id = 1u32;
         let mut send_pack_id_map = HashMap::<u32, ()>::new();
         let mut recv_pack_cache_map = HashMap::<u32, TunnelData>::new();
@@ -65,7 +67,7 @@ impl PeerClient {
             }
             let tunnel_data = tunnel_data?;
             if send_pack_id_map.get(&tunnel_data.header.pack_id).is_some() {
-                return Err(anyhow::anyhow!(
+                return Err(anyhow!(
                     "err:pack_id exist => pack_id:{}",
                     tunnel_data.header.pack_id
                 ))?;
@@ -98,7 +100,7 @@ impl PeerClient {
         &self,
         session_id: String,
         peer_stream_connect: Option<(Arc<Box<dyn PeerStreamConnect>>, SocketAddr)>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         let mut peer_stream_len = 1;
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -112,11 +114,16 @@ impl PeerClient {
                 continue;
             }
 
-            let ret: anyhow::Result<()> = async {
+            let ret: Result<()> = async {
                 log::debug!("connect_addr:{}", connect_addr);
-                let (stream, _, _) = peer_stream_connect.connect(connect_addr).await?;
+                let (stream, _, _) = peer_stream_connect
+                    .connect(connect_addr)
+                    .await
+                    .map_err(|e| anyhow!("err:connect => e:{}", e))?;
                 let session_id = session_id.clone();
-                self.create_peer_stream(true, session_id, stream).await?;
+                self.create_peer_stream(true, session_id, stream)
+                    .await
+                    .map_err(|e| anyhow!("err:create_peer_stream => e:{}", e))?;
                 Ok(())
             }
             .await;
@@ -133,7 +140,7 @@ impl PeerClient {
         is_spawn: bool,
         session_id: String,
         mut stream: StreamFlow,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         let stream_to_peer_stream_rx = self.stream_to_peer_stream_rx.clone();
         let peer_stream_to_peer_client_tx = self.peer_stream_to_peer_client_tx.clone();
         let tunnel_hello = TunnelHello {
@@ -148,7 +155,8 @@ impl PeerClient {
             &tunnel_hello,
             true,
         )
-        .await?;
+        .await
+        .map_err(|e| anyhow!("err:protopack::write_pack => e:{}", e))?;
 
         PeerStream::start(
             is_spawn,
@@ -156,7 +164,8 @@ impl PeerClient {
             stream_to_peer_stream_rx,
             peer_stream_to_peer_client_tx,
         )
-        .await?;
+        .await
+        .map_err(|e| anyhow!("err:PeerStream::start => e:{}", e))?;
         Ok(())
     }
 
@@ -164,7 +173,7 @@ impl PeerClient {
         &self,
         is_spawn: bool,
         stream: StreamFlow,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         let stream_to_peer_stream_rx = self.stream_to_peer_stream_rx.clone();
         let peer_stream_to_peer_client_tx = self.peer_stream_to_peer_client_tx.clone();
 
@@ -174,7 +183,8 @@ impl PeerClient {
             stream_to_peer_stream_rx,
             peer_stream_to_peer_client_tx,
         )
-        .await?;
+        .await
+        .map_err(|e| anyhow!("err:PeerStream::start => e:{}", e))?;
         Ok(())
     }
 }

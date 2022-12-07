@@ -4,6 +4,8 @@ use super::protopack::TunnelPack;
 use super::stream_flow::StreamFlow;
 use super::stream_flow::StreamFlowErr;
 use super::stream_flow::StreamFlowInfo;
+use anyhow::anyhow;
+use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::BufReader;
@@ -18,31 +20,33 @@ impl PeerStream {
         stream: StreamFlow,
         stream_to_peer_stream_rx: async_channel::Receiver<TunnelData>,
         peer_stream_to_peer_client_tx: async_channel::Sender<TunnelData>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         if is_spawn {
             tokio::spawn(async move {
-                let ret: anyhow::Result<()> = async {
+                let ret: Result<()> = async {
                     PeerStream::do_start(
                         true,
                         stream,
                         stream_to_peer_stream_rx,
                         peer_stream_to_peer_client_tx,
                     )
-                    .await?;
+                    .await
+                    .map_err(|e| anyhow!("err:PeerStream::do_start => e:{}", e))?;
                     Ok(())
                 }
                 .await;
                 ret.unwrap_or_else(|e| log::error!("err:do_start => e:{}", e));
             });
         } else {
-            let ret: anyhow::Result<()> = async {
+            let ret: Result<()> = async {
                 PeerStream::do_start(
                     false,
                     stream,
                     stream_to_peer_stream_rx,
                     peer_stream_to_peer_client_tx,
                 )
-                .await?;
+                .await
+                .map_err(|e| anyhow!("err:PeerStream::do_start => e:{}", e))?;
                 Ok(())
             }
             .await;
@@ -56,29 +60,29 @@ impl PeerStream {
         mut stream: StreamFlow,
         stream_to_peer_stream_rx: async_channel::Receiver<TunnelData>,
         peer_stream_to_peer_client_tx: async_channel::Sender<TunnelData>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         let stream_info = Arc::new(std::sync::Mutex::new(StreamFlowInfo::new()));
         stream.set_stream_info(Some(stream_info.clone()));
         let (r, w) = tokio::io::split(stream);
         let is_close = Arc::new(AtomicBool::new(false));
 
-        let ret: anyhow::Result<()> = async {
+        let ret: Result<()> = async {
             tokio::select! {
                 biased;
                 ret = PeerStream::read_stream(r,  is_close.clone(), peer_stream_to_peer_client_tx.clone(), stream_to_peer_stream_rx.clone()) => {
-                    ret.map_err(|e| anyhow::anyhow!("err:read_stream => e:{}", e))?;
+                    ret.map_err(|e| anyhow!("err:read_stream => e:{}", e))?;
                     Ok(())
                 }
                 ret = PeerStream::write_stream(w, is_close.clone(), peer_stream_to_peer_client_tx, stream_to_peer_stream_rx) => {
-                    ret.map_err(|e| anyhow::anyhow!("err:write_stream => e:{}", e))?;
+                    ret.map_err(|e| anyhow!("err:write_stream => e:{}", e))?;
                     Ok(())
                 }
                 ret = PeerStream::read_flow(is_spawn, stream_info.clone()) => {
-                    ret.map_err(|e| anyhow::anyhow!("err:read_flow => e:{}", e))?;
+                    ret.map_err(|e| anyhow!("err:read_flow => e:{}", e))?;
                     Ok(())
                 }
                 else => {
-                    return Err(anyhow::anyhow!("err:select"));
+                    return Err(anyhow!("err:select"));
                 }
             }
         }
@@ -97,7 +101,7 @@ impl PeerStream {
         is_close: Arc<AtomicBool>,
         peer_stream_to_peer_client_tx: async_channel::Sender<TunnelData>,
         stream_to_peer_stream_rx: async_channel::Receiver<TunnelData>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         let mut buf_read = BufReader::new(r);
         let mut slice = [0u8; protopack::TUNNEL_MAX_HEADER_SIZE];
         loop {
@@ -108,7 +112,7 @@ impl PeerStream {
 
             let pack = match protopack::read_pack(&mut buf_read, &mut slice)
                 .await
-                .map_err(|e| anyhow::anyhow!("err:read_pack => e:{}", e))
+                .map_err(|e| anyhow!("err:read_pack => e:{}", e))
             {
                 Err(e) => {
                     //socket失败直接退出
@@ -120,10 +124,7 @@ impl PeerStream {
 
             match pack {
                 TunnelPack::TunnelHello(value) => {
-                    return Err(anyhow::anyhow!(
-                        "err:TunnelHello => TunnelHello:{:?}",
-                        value
-                    ))?;
+                    return Err(anyhow!("err:TunnelHello => TunnelHello:{:?}", value))?;
                 }
                 TunnelPack::TunnelData(value) => {
                     log::trace!(
@@ -145,7 +146,7 @@ impl PeerStream {
         is_close: Arc<AtomicBool>,
         peer_stream_to_peer_client_tx: async_channel::Sender<TunnelData>,
         stream_to_peer_stream_rx: async_channel::Receiver<TunnelData>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         let mut buf_writer = BufWriter::new(w);
         loop {
             let tunnel_data = match tokio::time::timeout(
@@ -173,7 +174,7 @@ impl PeerStream {
             log::trace!("TunnelData:{:?}", tunnel_data.header);
             if let Err(e) = protopack::write_tunnel_data(&mut buf_writer, &tunnel_data)
                 .await
-                .map_err(|e| anyhow::anyhow!("err:write_tunnel_data => e:{}", e))
+                .map_err(|e| anyhow!("err:write_tunnel_data => e:{}", e))
             {
                 PeerStream::close(peer_stream_to_peer_client_tx, stream_to_peer_stream_rx);
                 return Err(e)?;
@@ -196,7 +197,7 @@ impl PeerStream {
     async fn read_flow(
         is_spawn: bool,
         stream_info: Arc<std::sync::Mutex<StreamFlowInfo>>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         let time = 10;
         let name = if is_spawn { "client" } else { "server" };
         loop {

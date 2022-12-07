@@ -1,7 +1,10 @@
+use anyhow::anyhow;
+use anyhow::Result;
 use serde::ser;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 pub const TUNNEL_MAX_HEADER_SIZE: usize = 4096;
 pub const TUNNEL_VERSION: &'static str = "tunnel.0.1.0";
 
@@ -14,9 +17,10 @@ pub struct TunnelHeader {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TunnelHeaderType {
+    TunnelMin = 0,
     TunnelHello = 1,
     TunnelData = 2,
-    Max = 3,
+    TunnelMax = 3,
 }
 
 #[derive(Clone, Debug)]
@@ -45,26 +49,36 @@ pub struct TunnelData {
 
 pub async fn read_tunnel_hello<R: AsyncRead + std::marker::Unpin>(
     buf_reader: &mut R,
-) -> anyhow::Result<Option<TunnelHello>> {
+) -> Result<Option<TunnelHello>> {
     let mut slice = [0u8; TUNNEL_MAX_HEADER_SIZE];
-    let pack = read_pack(buf_reader, &mut slice).await?;
+    let pack = read_pack(buf_reader, &mut slice)
+        .await
+        .map_err(|e| anyhow!("err:read_pack => e:{}", e))?;
     match pack {
         TunnelPack::TunnelHello(tunnel_hello) => {
             return Ok(Some(tunnel_hello));
         }
-        _ => return Err(anyhow::anyhow!("err:not tunnel_hello")),
+        _ => return Err(anyhow!("err:not tunnel_hello")),
     }
 }
 
 pub async fn write_tunnel_data<R: AsyncWrite + std::marker::Unpin>(
     buf_writer: &mut R,
     value: &TunnelData,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     let typ = TunnelHeaderType::TunnelData;
-    write_pack(buf_writer, typ, &value.header, false).await?;
-    buf_writer.write_all(&value.datas).await?;
+    write_pack(buf_writer, typ, &value.header, false)
+        .await
+        .map_err(|e| anyhow!("err:write_pack => e:{}", e))?;
+    buf_writer
+        .write_all(&value.datas)
+        .await
+        .map_err(|e| anyhow!("err:buf_writer.write_all => e:{}", e))?;
     log::trace!("write_pack datas len:{:?}", value.datas.len());
-    buf_writer.flush().await?;
+    buf_writer
+        .flush()
+        .await
+        .map_err(|e| anyhow!("err:buf_writer.flush => e:{}", e))?;
     Ok(())
 }
 
@@ -73,24 +87,36 @@ pub async fn write_pack<T: ?Sized, W: AsyncWrite + std::marker::Unpin>(
     typ: TunnelHeaderType,
     value: &T,
     is_flush: bool,
-) -> anyhow::Result<()>
+) -> Result<()>
 where
     T: ser::Serialize,
 {
-    let slice = toml::to_vec(value)?;
+    let slice = toml::to_vec(value).map_err(|e| anyhow!("err:toml::to_vec => e:{}", e))?;
     let header = TunnelHeader {
         header_type: typ as u8,
         body_size: slice.len() as u16,
     };
-    let header_slice = toml::to_vec(&header)?;
-    buf_writer.write_u16(header_slice.len() as u16).await?;
+    let header_slice = toml::to_vec(&header).map_err(|e| anyhow!("err:stream => e:{}", e))?;
+    buf_writer
+        .write_u16(header_slice.len() as u16)
+        .await
+        .map_err(|e| anyhow!("err:buf_writer.write_u16 => e:{}", e))?;
     log::trace!("write_pack header len:{:?}", header_slice.len());
-    buf_writer.write_all(&header_slice).await?;
+    buf_writer
+        .write_all(&header_slice)
+        .await
+        .map_err(|e| anyhow!("err: buf_writer.write_all => e:{}", e))?;
     log::trace!("write_pack header:{:?}", header);
-    buf_writer.write_all(&slice).await?;
+    buf_writer
+        .write_all(&slice)
+        .await
+        .map_err(|e| anyhow!("err: buf_writer.write_all => e:{}", e))?;
     log::trace!("write_pack body len:{:?}", slice.len());
     if is_flush {
-        buf_writer.flush().await?;
+        buf_writer
+            .flush()
+            .await
+            .map_err(|e| anyhow!("err:buf_writer.flush => e:{}", e))?;
     }
     Ok(())
 }
@@ -98,16 +124,16 @@ where
 pub async fn read_pack<R: AsyncRead + std::marker::Unpin>(
     buf_reader: &mut R,
     slice: &mut [u8],
-) -> anyhow::Result<TunnelPack> {
+) -> Result<TunnelPack> {
     //let mut slice = [0u8; TUNNEL_MAX_HEADER_SIZE];
     let header_size = buf_reader
         .read_u16()
         .await
-        .map_err(|e| anyhow::anyhow!("err:header_size => e:{}", e))?;
+        .map_err(|e| anyhow!("err:header_size => e:{}", e))?;
 
     log::trace!("header_size:{}", header_size);
     if header_size as usize > slice.len() || header_size <= 0 {
-        return Err(anyhow::anyhow!(
+        return Err(anyhow!(
             "err:header_size > slice.len() => header_size:{}",
             header_size
         ));
@@ -117,16 +143,18 @@ pub async fn read_pack<R: AsyncRead + std::marker::Unpin>(
     buf_reader
         .read_exact(header_slice)
         .await
-        .map_err(|e| anyhow::anyhow!("err:header_slice => e:{}", e))?;
-    let header: TunnelHeader = toml::from_slice(header_slice)
-        .map_err(|e| anyhow::anyhow!("err:TunnelData header=> e:{}", e))?;
+        .map_err(|e| anyhow!("err:header_slice => e:{}", e))?;
+    let header: TunnelHeader =
+        toml::from_slice(header_slice).map_err(|e| anyhow!("err:TunnelData header=> e:{}", e))?;
 
-    if header.header_type >= TunnelHeaderType::Max as u8 {
-        return Err(anyhow::anyhow!("err:TunnelData header_type"));
+    if header.header_type <= TunnelHeaderType::TunnelMin as u8
+        || header.header_type >= TunnelHeaderType::TunnelMax as u8
+    {
+        return Err(anyhow!("err:TunnelData header_type"));
     }
 
     if header.body_size as usize > slice.len() {
-        return Err(anyhow::anyhow!("err:TunnelData body_size"));
+        return Err(anyhow!("err:TunnelData body_size"));
     }
     log::trace!("read_pack header:{:?}", header);
 
@@ -135,27 +163,27 @@ pub async fn read_pack<R: AsyncRead + std::marker::Unpin>(
         buf_reader
             .read_exact(body_slice)
             .await
-            .map_err(|e| anyhow::anyhow!("err:body_slice => e:{}", e))?;
+            .map_err(|e| anyhow!("err:body_slice => e:{}", e))?;
     }
 
     if header.header_type == TunnelHeaderType::TunnelHello as u8 {
-        let value: TunnelHello = toml::from_slice(body_slice)
-            .map_err(|e| anyhow::anyhow!("err:TunnelDataAck=> e:{}", e))?;
+        let value: TunnelHello =
+            toml::from_slice(body_slice).map_err(|e| anyhow!("err:TunnelDataAck=> e:{}", e))?;
         Ok(TunnelPack::TunnelHello(value))
     } else if header.header_type == TunnelHeaderType::TunnelData as u8 {
-        let header: TunnelDataHeader = toml::from_slice(body_slice)
-            .map_err(|e| anyhow::anyhow!("err:TunnelData=> e:{}", e))?;
+        let header: TunnelDataHeader =
+            toml::from_slice(body_slice).map_err(|e| anyhow!("err:TunnelData=> e:{}", e))?;
         log::trace!("read_pack body:{:?}", header);
         let mut datas = vec![0u8; header.pack_size as usize];
         let mut datas_slice = datas.as_mut_slice();
         buf_reader
             .read_exact(&mut datas_slice)
             .await
-            .map_err(|e| anyhow::anyhow!("err:datas => e:{}", e))?;
+            .map_err(|e| anyhow!("err:datas => e:{}", e))?;
 
         log::trace!("read_pack datas.len:{:?}", datas.len());
         Ok(TunnelPack::TunnelData(TunnelData { header, datas }))
     } else {
-        Err(anyhow::anyhow!("err:TunnelPack type"))
+        Err(anyhow!("err:TunnelPack type"))
     }
 }
